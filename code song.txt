@@ -1,0 +1,190 @@
+
+!pip install transformers openpyxl -q
+
+import pandas as pd
+import numpy as np
+import torch
+import matplotlib.pyplot as plt
+
+from torch.utils.data import Dataset, DataLoader
+from transformers import BertTokenizer, BertForSequenceClassification, get_linear_schedule_with_warmup
+from torch.optim import AdamW
+from sklearn.metrics import accuracy_score, precision_recall_fscore_support
+from tqdm import tqdm
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print("Device:", device)
+
+
+DATA_PATH = "/kaggle/input/datasets/manashitadinda/train-test-validation-dataset/"
+
+train_df = pd.read_excel(DATA_PATH + "train_dataset (1).xlsx")
+val_df   = pd.read_excel(DATA_PATH + "validation_dataset.xlsx")
+test_df  = pd.read_excel(DATA_PATH + "test_dataset.xlsx")
+
+TEXT_COL = train_df.columns[0]
+LABEL_COL = train_df.columns[1]
+
+
+
+labels = sorted(train_df[LABEL_COL].unique())
+label2id = {l:i for i,l in enumerate(labels)}
+
+train_df["label"] = train_df[LABEL_COL].map(label2id)
+val_df["label"]   = val_df[LABEL_COL].map(label2id)
+test_df["label"]  = test_df[LABEL_COL].map(label2id)
+
+NUM_LABELS = len(label2id)
+
+tokenizer = BertTokenizer.from_pretrained("bert-base-multilingual-cased")
+
+class LyricsDataset(Dataset):
+    def __init__(self, texts, labels):
+        self.texts = texts.astype(str).tolist()
+        self.labels = labels.tolist()
+
+    def __len__(self):
+        return len(self.texts)
+
+    def __getitem__(self, idx):
+        enc = tokenizer(
+            self.texts[idx],
+            padding="max_length",
+            truncation=True,
+            max_length=128,
+            return_tensors="pt"
+        )
+        return {
+            "input_ids": enc["input_ids"].squeeze(0),
+            "attention_mask": enc["attention_mask"].squeeze(0),
+            "labels": torch.tensor(self.labels[idx])
+        }
+
+
+train_loader = DataLoader(LyricsDataset(train_df[TEXT_COL], train_df["label"]), batch_size=8, shuffle=True)
+val_loader   = DataLoader(LyricsDataset(val_df[TEXT_COL], val_df["label"]), batch_size=8)
+test_loader  = DataLoader(LyricsDataset(test_df[TEXT_COL], test_df["label"]), batch_size=8)
+
+model = BertForSequenceClassification.from_pretrained(
+    "bert-base-multilingual-cased",
+    num_labels=NUM_LABELS,
+    hidden_dropout_prob=0.3,          # 🔥 prevents overfitting
+    attention_probs_dropout_prob=0.3
+)
+
+model.to(device)
+
+optimizer = AdamW(model.parameters(), lr=2e-5, weight_decay=0.01)  # 🔥 weight decay
+
+EPOCHS = 10
+
+total_steps = len(train_loader) * EPOCHS
+
+scheduler = get_linear_schedule_with_warmup(
+    optimizer,
+    num_warmup_steps=0,
+    num_training_steps=total_steps
+)
+
+
+def evaluate(model, loader):
+    model.eval()
+    preds, labels = [], []
+
+    total_loss = 0
+
+    with torch.no_grad():
+        for batch in loader:
+            ids = batch["input_ids"].to(device)
+            mask = batch["attention_mask"].to(device)
+            y = batch["labels"].to(device)
+
+            out = model(ids, attention_mask=mask, labels=y)
+
+            total_loss += out.loss.item()
+            pred = torch.argmax(out.logits, dim=1)
+
+            preds.extend(pred.cpu().numpy())
+            labels.extend(y.cpu().numpy())
+
+    acc = accuracy_score(labels, preds)
+    _, _, f1, _ = precision_recall_fscore_support(labels, preds, average="weighted")
+
+    return total_loss/len(loader), acc, f1
+
+train_losses, val_losses = [], []
+val_accs, val_f1s = []
+
+best_val_loss = float("inf")
+patience = 2   # 🔥 stops if overfitting starts
+counter = 0
+
+for epoch in range(EPOCHS):
+    model.train()
+    total_loss = 0
+
+    for batch in tqdm(train_loader):
+        optimizer.zero_grad()
+
+        ids = batch["input_ids"].to(device)
+        mask = batch["attention_mask"].to(device)
+        y = batch["labels"].to(device)
+
+        out = model(ids, attention_mask=mask, labels=y)
+        loss = out.loss
+
+        total_loss += loss.item()
+
+        loss.backward()
+        optimizer.step()
+        scheduler.step()
+
+    train_loss = total_loss / len(train_loader)
+
+    val_loss, val_acc, val_f1 = evaluate(model, val_loader)
+
+    train_losses.append(train_loss)
+    val_losses.append(val_loss)
+    val_accs.append(val_acc)
+    val_f1s.append(val_f1)
+
+    print(f"\nEpoch {epoch+1}")
+    print(f"Train Loss: {train_loss:.4f}")
+    print(f"Val Loss  : {val_loss:.4f}")
+    print(f"Val Acc   : {val_acc:.4f}")
+
+    # 🔥 Early stopping
+    if val_loss < best_val_loss:
+        best_val_loss = val_loss
+        counter = 0
+        torch.save(model.state_dict(), "best_model.pt")
+    else:
+        counter += 1
+        if counter >= patience:
+            print("Early stopping triggered!")
+            break
+epochs_range = range(1, len(train_losses)+1)
+
+plt.figure(figsize=(12,5))
+
+plt.subplot(1,2,1)
+plt.plot(epochs_range, train_losses, label="Train Loss")
+plt.plot(epochs_range, val_losses, label="Val Loss")
+plt.legend()
+plt.title("Loss Curve")
+
+plt.subplot(1,2,2)
+plt.plot(epochs_range, val_accs, label="Val Accuracy")
+plt.plot(epochs_range, val_f1s, label="Val F1")
+plt.legend()
+plt.title("Performance")
+
+plt.show()
+
+model.load_state_dict(torch.load("best_model.pt"))
+
+test_loss, test_acc, test_f1 = evaluate(model, test_loader)
+
+print("\nFINAL TEST")
+print("Accuracy:", test_acc)
+print("F1:", test_f1)
