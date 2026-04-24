@@ -68,13 +68,13 @@ test_loader  = DataLoader(LyricsDataset(test_df[TEXT_COL], test_df["label"]), ba
 model = BertForSequenceClassification.from_pretrained(
     "bert-base-multilingual-cased",
     num_labels=NUM_LABELS,
-    hidden_dropout_prob=0.3,          # 🔥 prevents overfitting
+    hidden_dropout_prob=0.3,          
     attention_probs_dropout_prob=0.3
 )
 
 model.to(device)
 
-optimizer = AdamW(model.parameters(), lr=2e-5, weight_decay=0.01)  # 🔥 weight decay
+optimizer = AdamW(model.parameters(), lr=2e-5, weight_decay=0.01)  
 
 EPOCHS = 10
 
@@ -116,7 +116,7 @@ train_losses, val_losses = [], []
 val_accs, val_f1s = []
 
 best_val_loss = float("inf")
-patience = 2   # 🔥 stops if overfitting starts
+patience = 2   
 counter = 0
 
 for epoch in range(EPOCHS):
@@ -152,8 +152,6 @@ for epoch in range(EPOCHS):
     print(f"Train Loss: {train_loss:.4f}")
     print(f"Val Loss  : {val_loss:.4f}")
     print(f"Val Acc   : {val_acc:.4f}")
-
-    # 🔥 Early stopping
     if val_loss < best_val_loss:
         best_val_loss = val_loss
         counter = 0
